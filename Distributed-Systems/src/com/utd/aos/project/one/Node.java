@@ -12,15 +12,11 @@ import java.io.ObjectOutputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.Socket;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.Deque;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -54,14 +50,11 @@ public class Node {
 	private Node[] adjList;
 	private int parent;
 	private List<Integer> children;
-	private List<LocalState> snapshotsRcvd;
-	private int snapshotsCount;
-	Map<Integer, Socket> socketMap = new HashMap<>();
+	private Set<LocalState> snapshotsRcvd;
+	private Set<Integer> snapshotsFromChildren;
 	
 	private static final String CONFIG_FILE = "config.txt";
 	private static final int SYNC = 0;
-	
-	private final SimpleDateFormat formatter= new SimpleDateFormat("yyyy-MM-dd 'at' HH:mm:ss.SSS z");
 	
 	public Node(int ID, String hostname, int port, String status) {
 		setID(ID);
@@ -84,9 +77,9 @@ public class Node {
 		setMaxNumber(maxNumber);
 		setNeighbors(neighbors);
 		monitoringMarkers = new HashSet<>();
-		snapshotsRcvd = new ArrayList<>();
+		snapshotsRcvd = new HashSet<>();
+		snapshotsFromChildren = new HashSet<>();
 		setAdjList(adjList);
-		System.out.println("Initial State"+getStatus()+". Msgs per active: "+getMsgsPerActive());
 		initializeVectorClock();
 		
 		//construct spanning tree
@@ -94,7 +87,7 @@ public class Node {
 		
 		//scheduler to keep sending messages to neighbors periodically.
 		ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(); 
-		scheduler.scheduleAtFixedRate(new SendMessagesScheduler(this), 10000, getMinSendDelay(), TimeUnit.MILLISECONDS);
+		scheduler.scheduleAtFixedRate(new SendMessagesScheduler(this), 2000, getMinSendDelay(), TimeUnit.MILLISECONDS);
 	
 		//Listener to receive messages
 		MessageListener messageListener = new MessageListener(this);
@@ -111,6 +104,8 @@ public class Node {
 		int n = getNumberOfNodes();
 		boolean[] visited = new boolean[n];
 		int[] parents = new int[n];
+		
+		@SuppressWarnings("unchecked")
 		List<Integer>[] children = new LinkedList[n];
 		
 		queue.offer(0);
@@ -136,98 +131,84 @@ public class Node {
 		updateVectorClockBeforeSend();
 		Message message = new AppMessage(getID(), getVectorClock());
 		Node neighbor = neighbors.get(getRandomIntegerBetweenRange(0, neighbors.size()-1));
-		//System.out.println("Sending message: "+ this.ID+" to "+neighbor.getID() +" Clock: "+this.vectorClock.get(0)+" "+ this.vectorClock.get(1)+" "+ this.vectorClock.get(2)+" "+ this.vectorClock.get(3)+" "+ this.vectorClock.get(4));
 		send(message, neighbor.getID(), neighbor.getHostname(), neighbor.getPort());
 		increamentMessagesSent();
-		if(getOverallMessagesSent() == getMaxNumber() || getMessagesSent() == getMsgsPerActive()) 
-			setStatus("Passive");
+		if(getOverallMessagesSent() == getMaxNumber() || getMessagesSent() == getMsgsPerActive()) setStatus("Passive");
 	}
 	
 	protected synchronized void receiveAppMessage(AppMessage message) {
 		//check for in-transit msgs and update the localState.
-		if(getLocalState() != null && this.monitoringMarkers.contains(message.getID())) 
-			getLocalState().incrementInTransit();
+		if(getLocalState() != null && this.monitoringMarkers.contains(message.getID())) getLocalState().incrementInTransit();
 		
-		//System.out.println("Receiving message:"+ this.ID+" my Clock: "+this.vectorClock.get(0)+" "+ this.vectorClock.get(1)+" "+ this.vectorClock.get(2)+" "+ this.vectorClock.get(3)+" "+ this.vectorClock.get(4));
-		//System.out.println("Receiving message:"+ this.ID+" rcvd Clock from : "+message.getID()+" "+message.getVectorClock().get(0)+" "+message.getVectorClock().get(1)+" "+ message.getVectorClock().get(2)+" "+ message.getVectorClock().get(3)+" "+ message.getVectorClock().get(4));
 		if(getStatus().equalsIgnoreCase("Passive") && getOverallMessagesSent() < getMaxNumber()) {
 			setStatus("Active");
 			setMessagesSent(0);
 		}
-			
 		
 		//update vector clock.
 		updateVectorClockAfterRcv(message.getVectorClock());
-		//System.out.println("Receiving message:"+ this.ID+" final Clock: "+this.vectorClock.get(0)+" "+ this.vectorClock.get(1)+" "+ this.vectorClock.get(2)+" "+ this.vectorClock.get(3)+" "+ this.vectorClock.get(4));
 	}
 	
 	protected void sendMarkerMessage()  {
-		for(Node neighbor : getNeighbors()) {
-			//System.out.println(formatter.format(date)+" :Sending marker message: "+ this.ID +"to " +neighbor.getID());
+		for(Node neighbor : getNeighbors()) 
 			send(new MarkerMessage(getID()), neighbor.getID(), neighbor.getHostname(), neighbor.getPort());
+	}
+	
+	protected synchronized void recordLocalState() {
+		if(getLocalState() != null) return;
+		//record local state
+		setLocalState(new LocalState(getID(), getStatus(), new ArrayList<>(getVectorClock()), 0));
+		//send marker messages to all its neighbors
+		sendMarkerMessage();
+		//output recorded state
+		StringBuilder output = new StringBuilder();
+		for(int i=0;i<getNumberOfNodes();i++) 
+			output.append(getLocalState().getVectorClock().get(i)).append(" ");
+		output.append("\n");
+	    try {
+	    	BufferedWriter writer = new BufferedWriter(new FileWriter("config-"+getID()+".out", true));
+			writer.append(output.toString());
+			writer.close();
+		} catch (IOException e) {
+			e.printStackTrace();
 		}
-			
 	}
 	
 	protected synchronized void receiveMarkerMessage(MarkerMessage message) {
-		Date date = new Date(System.currentTimeMillis());
-		//System.out.println(formatter.format(date) +" :Receiving marker message at "+ this.ID+ " from "+message.getID());
 		//check if localState is null. 
 		if(getLocalState() == null) {
-			//record local state
-			setLocalState(new LocalState(getID(), getStatus(), new ArrayList<>(getVectorClock()), 0));
-			System.out.println("Current Status"+getStatus()+". Msgs sent: "+getMessagesSent() +". Overall msgs sent: "+getOverallMessagesSent());
-			//output recorded state
-			StringBuilder output = new StringBuilder();
-			for(int i=0;i<getNumberOfNodes();i++) {
-				output.append(getLocalState().getVectorClock().get(i)).append(" ");
-			}
-			output.append("\n");
-			
-		    try {
-		    	BufferedWriter writer = new BufferedWriter(new FileWriter("config-"+getID()+".out", true));
-				writer.append(output.toString());
-				writer.close();
-			} catch (IOException e) {
-				e.printStackTrace();
-			}
+			recordLocalState();
 			
 			//monitor all other neighbors
 			for(Node neighbor : neighbors) {
 				if(neighbor.getID() == message.getID()) continue;
 				this.monitoringMarkers.add(neighbor.getID());
 			}
-			//send marker messages to all its neighbors
-			sendMarkerMessage();
 		} else {
 			this.monitoringMarkers.remove(Integer.valueOf(message.getID()));
 		}
 		
-		//if no more monitoring is needed, converge-cast snapshot to node 0.
-		if(this.monitoringMarkers.size() == 0) sendSnapshotMessage();
+		//if no more monitoring is needed and snapshot has been received by all children, converge-cast snapshot to node 0.
+		sendSnapshotMessage();
 	}
 	
 	private synchronized void sendSnapshotMessage() {
-		if(getID() != SYNC && (getChildren().size() == 0 || getSnapshotsCount() == getChildren().size())) {
-			Date date = new Date(System.currentTimeMillis());
-			//System.out.println(formatter.format(date)+" :Sending snapshot message: "+ this.ID);
+		if(getID() != SYNC && this.monitoringMarkers.size() == 0 && getSnapshotsFromChildren().size() == getChildren().size()) {
 			List<LocalState> collectedSnapshots = new ArrayList<>();
 			collectedSnapshots.add(getLocalState());
 			collectedSnapshots.addAll(getSnapshotsRcvd());
 			send(new SnapshotMessage(getID(), collectedSnapshots), getAdjList()[parent].getID(), getAdjList()[parent].getHostname(), getAdjList()[parent].getPort());
 			setLocalState(null);
 			getSnapshotsRcvd().clear();
-			setSnapshotsCount(0);
+			getSnapshotsFromChildren().clear();;
 		}
 	}
 	
 	protected synchronized void receiveSnapshotMessage(SnapshotMessage message) throws IOException {
 		getSnapshotsRcvd().addAll(message.getLocalState());
-		setSnapshotsCount(getSnapshotsCount()+1);
-		Date date = new Date(System.currentTimeMillis());
-		//System.out.println(formatter.format(date)+" :Receiving snapshot message: "+ this.ID+ " from "+ message.getID());
+		getSnapshotsFromChildren().add(message.getID());
 		if(getID() == SYNC) {
-			if(getSnapshotsCount() == getChildren().size()) {
+			if(getSnapshotsFromChildren().size() == getChildren().size()) {
 				// Print if global snapshot is consistent
 				List<LocalState> globalState = new ArrayList<>(getSnapshotsRcvd());
 				globalState.add(getLocalState());
@@ -241,11 +222,11 @@ public class Node {
 				
 				setLocalState(null);
 				getSnapshotsRcvd().clear();
-				setSnapshotsCount(0);
+				getSnapshotsFromChildren().clear();
 			}
 		} else {
-			if(getSnapshotsCount() == getChildren().size()) //if received snapshots from all children, send to parent.
-				sendSnapshotMessage();
+			//if no more monitoring is needed and snapshot has been received by all children, converge-cast snapshot to parent.
+			sendSnapshotMessage();
 		}
 	}
 	
@@ -268,8 +249,6 @@ public class Node {
 
 	private boolean isSnapshotConsistent(List<LocalState> localStates) {
 		int n = getNumberOfNodes();
-		for(int i=0;i<n;i++) System.out.println(localStates.get(i).getVectorClock().get(0)+" "+localStates.get(i).getVectorClock().get(1)+" "+ localStates.get(i).getVectorClock().get(2)+" "+ localStates.get(i).getVectorClock().get(3)+" "+ localStates.get(i).getVectorClock().get(4));
-		//for(int i=0;i<n;i++) System.out.println(localStates.get(i).getVectorClock().get(0)+" "+localStates.get(i).getVectorClock().get(1));
 		int[] Vmax = new int[n];
 		for(int i=0;i<n;i++) {
 			LocalState ls = localStates.get(i);
@@ -281,14 +260,7 @@ public class Node {
 			LocalState ls = localStates.get(i);
 			if(ls.getVectorClock().get(ls.getNodeID()) != Vmax[ls.getNodeID()]) return false;
 		}
-		/*for(int i=0;i<n;i++) {
-			for(int j=i+1;j<n;j++) {
-				LocalState ls1 = localStates.get(i);
-				LocalState ls2 = localStates.get(j);
-				if(ls1.getVectorClock().get(ls1.getNodeID()) < ls2.getVectorClock().get(ls1.getNodeID()) 
-						|| ls2.getVectorClock().get(ls2.getNodeID()) < ls1.getVectorClock().get(ls2.getNodeID())) return false;
-			}
-		}*/
+		
 		return true;
 	}
 
@@ -297,8 +269,8 @@ public class Node {
 		OutputStream os = null;
 		ObjectOutputStream oos = null;
 		try {
-			//if(!socketMap.containsKey(destID)) socketMap.put(destID, new Socket("127.0.0.1", destPort));
 			s = new Socket(InetAddress.getByName(destHost).getHostAddress(), destPort);
+			//s = new Socket("127.0.0.1", destPort);
 			os = s.getOutputStream();
 			oos = new ObjectOutputStream(os);
 			oos.writeObject(message);
@@ -316,7 +288,6 @@ public class Node {
 		int maxNumber = 0;
 		int ID = 0;
 		
-		//String ip = args[0];
 		String[] possibleStatus = {"Active", "Passive"};
 		
 		try (BufferedReader br = new BufferedReader(new FileReader(CONFIG_FILE))) {
@@ -336,7 +307,6 @@ public class Node {
 				n = numberOfNodes;
 				break;
 			}
-			System.out.println("Node IP: "+inetAddress.getHostAddress());
 			Node[] nodeList = new Node[numberOfNodes];
 			while(n > 0) {
 				currentLine = preprocessConfig(br.readLine());
@@ -346,8 +316,6 @@ public class Node {
 				String currHost = params[1]+".utdallas.edu";
 				int currPort = Integer.parseInt(params[2]);
 				
-				//if(ip.equals(InetAddress.getByName(currHost).getHostAddress())) ID = currID;
-				System.out.println(currHost+"=="+InetAddress.getByName(currHost).getHostAddress());
 				if(inetAddress.getHostAddress().equals(InetAddress.getByName(currHost).getHostAddress())) ID = currID;
 				nodeList[currID] = new Node(currID, currHost, currPort, possibleStatus[getRandomIntegerBetweenRange(0, 1)]);
 				n--;
@@ -546,20 +514,20 @@ public class Node {
 		this.children = children == null ? new LinkedList<>() : children;
 	}
 
-	public List<LocalState> getSnapshotsRcvd() {
+	public Set<LocalState> getSnapshotsRcvd() {
 		return snapshotsRcvd;
 	}
 
-	public void setSnapshotsRcvd(List<LocalState> snapshotsRcvd) {
+	public void setSnapshotsRcvd(Set<LocalState> snapshotsRcvd) {
 		this.snapshotsRcvd = snapshotsRcvd;
 	}
 
-	public int getSnapshotsCount() {
-		return snapshotsCount;
+	public Set<Integer> getSnapshotsFromChildren() {
+		return snapshotsFromChildren;
 	}
 
-	public void setSnapshotsCount(int snapshotsCount) {
-		this.snapshotsCount = snapshotsCount;
+	public void setSnapshotsFromChildren(Set<Integer> snapshotsFromChildren) {
+		this.snapshotsFromChildren = snapshotsFromChildren;
 	}
 
 	private void initializeVectorClock() {

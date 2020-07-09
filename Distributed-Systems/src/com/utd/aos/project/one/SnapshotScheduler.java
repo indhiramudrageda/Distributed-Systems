@@ -16,6 +16,6 @@ public class SnapshotScheduler implements Runnable {
 
 	@Override
 	public void run() {
-		node.sendMarkerMessage();
+		node.recordLocalState();
 	}
 }

@@ -61,4 +61,9 @@ public class LocalState implements Serializable{
 		this.vectorClock = vectorClock;
 	}
 
+	@Override
+	public boolean equals(Object o) {
+		LocalState ls = (LocalState)o;
+		return this.nodeID == ls.nodeID;
+	}
 }

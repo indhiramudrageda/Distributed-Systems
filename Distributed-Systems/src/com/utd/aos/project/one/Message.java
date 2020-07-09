@@ -14,7 +14,7 @@ public class Message implements Serializable{
 	private int ID;
 	
 	public Message() {
-		// TODO Auto-generated constructor stub
+		
 	}
 
 	public int getID() {
